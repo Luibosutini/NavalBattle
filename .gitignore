@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# AWS Credentials (NEVER commit)
+*.pem
+*.key
+credentials
+config
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+fleet_node.log
+
+# Test artifacts
+fleet_work/
+*.md
+!README.md
+
+# Temporary files
+*.tmp
+*.bak
+ca_report.md
+downloaded.txt
+latest_cvb.md
+test.txt
