@@ -81,7 +81,10 @@ def _load_policy_defaults(policy_path: Path) -> Dict[str, Optional[str]]:
 
 
 def resolve_fleet_config() -> Dict[str, Optional[str]]:
-    policy_path = Path(os.getenv("FLEET_POLICY_PATH", Path(__file__).with_name("FleetNodePolicy.json")))
+    default_policy = Path(__file__).with_name("policies").joinpath("FleetNodePolicy.json")
+    if not default_policy.exists():
+        default_policy = Path(__file__).with_name("FleetNodePolicy.json")
+    policy_path = Path(os.getenv("FLEET_POLICY_PATH", str(default_policy)))
     defaults = _load_policy_defaults(policy_path)
 
     return {

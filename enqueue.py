@@ -143,7 +143,9 @@ def main():
     # 4) Capital ship selection (BB or CVB)
     capital = auto_capital_choice(signals)
 
-    results_prefix = f"s3://{BUCKET}/results/{task_id}/"
+    # New structure: missions are under missions/{mission_id}/... and mission_id starts with M-{task_id}-*
+    # Use a prefix that matches all missions for this task.
+    results_prefix = f"s3://{BUCKET}/missions/M-{task_id}-"
 
     if capital == "CVB" and repo_url:
         # CVB campaign: micro/lite "air wing" emulated by running multiple test_cmds

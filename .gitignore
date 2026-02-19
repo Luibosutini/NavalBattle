@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -42,7 +42,9 @@ fleet_work/
 # Temporary files
 *.tmp
 *.bak
-ca_report.md
-downloaded.txt
-latest_cvb.md
-test.txt
+docs/notes/ca_report.md
+docs/notes/latest_cvb.md
+samples/misc/downloaded.txt
+samples/misc/test.txt
+policies/FleetNodePolicy.local.json
+scripts/start_fleet.local.ps1

@@ -2,6 +2,8 @@
 
 AWS-based AI code generation system using naval battle metaphor.
 
+Japanese version: `README.ja.md`
+
 ## Architecture
 
 **艦隊ドクトリン（Fleet Doctrine）:**
@@ -28,8 +30,15 @@ AWS-based AI code generation system using naval battle metaphor.
 - `test_report.py` - Test results reporter
 
 ### Configuration
-- `FleetNodePolicy.json` - IAM policy for fleet-node user
+- `policies/FleetNodePolicy.json` - IAM policy for fleet-node user
 - `requirements.txt` - Python dependencies
+
+### Supporting
+- `docs/` - Architecture, operations, and troubleshooting docs
+- `docs/notes/` - Bedrock and mission notes
+- `scripts/` - PowerShell/Bash helper scripts
+- `samples/` - Sample tickets and misc files
+- `runtime/logs/` - Runtime log output
 
 ## Setup
 
@@ -63,7 +72,7 @@ aws s3 mb s3://fleet-tokyo-artifacts-XXXXX
 aws iam create-user --user-name fleet-node
 aws iam put-user-policy --user-name fleet-node \
   --policy-name FleetNodePolicy \
-  --policy-document file://FleetNodePolicy.json
+  --policy-document file://policies/FleetNodePolicy.json
 ```
 
 3. **Environment Variables:**
@@ -76,17 +85,17 @@ export FLEET_S3_BUCKET=fleet-tokyo-artifacts-XXXXX  # Replace XXXXX
 export REPO_URL=https://github.com/your/repo.git    # Replace with your repo
 
 # Bedrock Model IDs (verified for ap-northeast-1)
-export BEDROCK_SONNET_MODEL_ID=anthropic.claude-3-5-sonnet-20240620-v1:0
-export BEDROCK_OPUS_MODEL_ID=anthropic.claude-3-opus-20240229-v1:0
-export BEDROCK_MICRO_MODEL_ID=amazon.nova-micro-v1:0
-export BEDROCK_LITE_MODEL_ID=amazon.nova-lite-v1:0
+export BEDROCK_SONNET_MODEL_ID=arn:aws:bedrock:ap-northeast-1:249033470572:inference-profile/jp.anthropic.claude-sonnet-4-5-20250929-v1:0
+export BEDROCK_OPUS_MODEL_ID=arn:aws:bedrock:ap-northeast-1:249033470572:inference-profile/global.anthropic.claude-opus-4-6-v1
+export BEDROCK_MICRO_MODEL_ID=arn:aws:bedrock:ap-northeast-1:249033470572:inference-profile/apac.amazon.nova-micro-v1:0
+export BEDROCK_LITE_MODEL_ID=arn:aws:bedrock:ap-northeast-1:249033470572:inference-profile/apac.amazon.nova-lite-v1:0
 export BEDROCK_MISTRAL_MODEL_ID=mistral.mistral-7b-instruct-v0:2
 ```
 
 **PowerShell (Windows):**
 ```powershell
 # Use start_fleet.ps1 script (edit placeholders first)
-.\start_fleet.ps1
+.\scripts\start_fleet.ps1
 ```
 
 4. **Run:**
@@ -95,7 +104,7 @@ export BEDROCK_MISTRAL_MODEL_ID=mistral.mistral-7b-instruct-v0:2
 python fleet_node.py
 
 # Windows (PowerShell)
-.\start_fleet.ps1
+.\scripts\start_fleet.ps1
 ```
 
 ## Bedrock Model Access
@@ -117,6 +126,17 @@ python enqueue.py --task T-001 --ship CVL-01 --ticket "Implement feature X"
 
 # Check results
 python test_report.py
+```
+
+## Local Workspace & Logs
+
+- `config.yaml` defines ship mental models and local workspace layout.
+- `navalctl` provides local workspace creation and log search.
+
+```bash
+python navalctl.py init
+python navalctl.py mkws --mission-id M-XXX --task-id T-XXX --ship-class CVL
+python navalctl.py search --query "NEED_INPUT"
 ```
 
 ## Budget Management
