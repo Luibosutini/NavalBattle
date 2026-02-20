@@ -8,6 +8,7 @@ import sys
 import json
 import time
 import uuid
+import subprocess
 import boto3
 from datetime import datetime
 try:
@@ -17,6 +18,7 @@ except Exception:
 
 REGION = os.getenv("FLEET_REGION", "ap-northeast-1")
 STATE_TABLE = os.getenv("FLEET_STATE_TABLE", "fleet-mission-state")
+TASK_STATE_TABLE = os.getenv("FLEET_TASK_STATE_TABLE", "fleet-task-state")
 BUCKET = os.getenv("FLEET_S3_BUCKET", "")
 SQS_NAME = os.getenv("FLEET_SQS_NAME", "fleet-missions")
 
@@ -135,6 +137,77 @@ def record_comm(mission_id, from_, to, comm_type, content):
             pass
 
 
+def get_task_state(task_id):
+    try:
+        resp = dynamodb.get_item(
+            TableName=TASK_STATE_TABLE,
+            Key={"task_id": {"S": task_id}}
+        )
+        return resp.get("Item")
+    except Exception as e:
+        print(f"Error loading task state: {e}")
+        return None
+
+
+def _base_stage_name(stage_name: str) -> str:
+    if "_" in stage_name:
+        return stage_name.split("_", 1)[0]
+    return stage_name
+
+
+def resolve_ca_mission_id(task_item):
+    if not task_item:
+        return None
+    stages = task_item.get("stages", {}).get("M", {})
+    for stage_name, stage_item in stages.items():
+        if _base_stage_name(stage_name) != "CA":
+            continue
+        mission = stage_item.get("M", {}).get("mission_id", {})
+        if "S" in mission and mission["S"]:
+            return mission["S"]
+    return None
+
+
+def put_ca_directive(task_id, directive_text):
+    task_item = get_task_state(task_id)
+    if not task_item:
+        print(f"Task not found: {task_id}")
+        return None
+    mission_id = resolve_ca_mission_id(task_item)
+    if not mission_id:
+        print(f"No CA mission found for task: {task_id}")
+        return None
+
+    ts = int(time.time())
+    content = (
+        f"# Human CA Directive\n"
+        f"task_id: {task_id}\n"
+        f"updated_at: {datetime.utcfromtimestamp(ts).isoformat()}Z\n\n"
+        f"{directive_text.strip()}\n"
+    )
+    key = f"missions/{mission_id}/artifacts/ca_human_directive.md"
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=key,
+        Body=content.encode("utf-8"),
+        ContentType="text/markdown; charset=utf-8",
+    )
+    record_comm(mission_id, "user", "CA", "ca_directive", directive_text.strip())
+    return mission_id
+
+
+def advance_task_from_cli(task_id, repo_url=""):
+    cmd = [sys.executable, "task_orchestrator.py", "advance", task_id]
+    if repo_url:
+        cmd.append(repo_url)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout.strip())
+    if result.returncode != 0 and result.stderr:
+        print(result.stderr.strip())
+    return result.returncode == 0
+
+
 def resume_mission(mission_id, status, response_text):
     """Resume mission by updating DynamoDB and re-enqueuing"""
     try:
@@ -229,10 +302,94 @@ def resume_mission(mission_id, status, response_text):
         return False
 
 
+def _read_multiline(prompt):
+    print(prompt)
+    lines = []
+    try:
+        while True:
+            line = input()
+            lines.append(line)
+    except EOFError:
+        pass
+    return "\n".join(lines).strip()
+
+
+def handle_ca_mode(argv):
+    if len(argv) < 1:
+        print("Usage: python fleet_interact.py ca <task_id> [--repo-url URL] [--no-advance] [--directive TEXT]")
+        return
+
+    task_id = argv[0]
+    repo_url = os.getenv("REPO_URL", "")
+    auto_advance = True
+    directive_text = ""
+
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--repo-url" and i + 1 < len(argv):
+            repo_url = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--repo-url="):
+            repo_url = arg.split("=", 1)[1]
+            i += 1
+            continue
+        if arg == "--no-advance":
+            auto_advance = False
+            i += 1
+            continue
+        if arg == "--directive" and i + 1 < len(argv):
+            directive_text = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--directive="):
+            directive_text = arg.split("=", 1)[1]
+            i += 1
+            continue
+        i += 1
+
+    if not directive_text:
+        template = (
+            "Enter CA directive (Ctrl+D/Ctrl+Z to finish).\n"
+            "Example:\n"
+            "Execute: DD_SONNET, DD_MISTRAL\n"
+            "Patch: DD_SONNET=s3://.../a.patch, DD_MISTRAL=s3://.../b.patch\n"
+            "Skip: BB\n"
+            "Done: no\n"
+            "Confidence: 75\n"
+        )
+        directive_text = _read_multiline(template)
+
+    if not directive_text.strip():
+        print("No directive provided")
+        return
+
+    mission_id = put_ca_directive(task_id, directive_text)
+    if not mission_id:
+        return
+
+    print(f"Saved CA directive to mission: {mission_id}")
+
+    if not auto_advance:
+        print("Auto-advance skipped")
+        return
+
+    ok = advance_task_from_cli(task_id, repo_url)
+    if ok:
+        print(f"Task {task_id} advanced using CA directive")
+    else:
+        print(f"Task {task_id} advance failed")
+
+
 def main():
     if not BUCKET:
         print("Error: FLEET_S3_BUCKET not set")
         sys.exit(1)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "ca":
+        handle_ca_mode(sys.argv[2:])
+        return
 
     print("=== Fleet Interact - Pending Missions ===\n")
 
@@ -286,15 +443,7 @@ def main():
 
         # Get human response
         if status == "NEED_INPUT":
-            print("Enter your response (multi-line, Ctrl+D/Ctrl+Z to finish):")
-            lines = []
-            try:
-                while True:
-                    line = input()
-                    lines.append(line)
-            except EOFError:
-                pass
-            response = "\n".join(lines).strip()
+            response = _read_multiline("Enter your response (multi-line, Ctrl+D/Ctrl+Z to finish):")
         elif status == "NEED_APPROVAL":
             response = input("Approve? (yes/no): ").strip()
         else:

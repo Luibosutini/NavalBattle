@@ -125,7 +125,6 @@ def _extract_extra_stages(text: str) -> List[str]:
                     stages.append(s)
             return stages
     return []
-
 def _apply_extra_stages(
     task_id: str,
     current_stage: str,
@@ -269,8 +268,6 @@ def _parse_ca_directives(text: str) -> Dict[str, Any]:
         skip_set = set(result["skip"])
         result["execute"] = [s for s in result["execute"] if s not in skip_set]
     return result
-
-
 def _apply_skip_stages(
     task_id: str,
     current_stage: str,
@@ -347,6 +344,15 @@ def _read_ca_report(mission_id: str) -> str:
         return ""
 
 
+def _read_ca_human_directive(mission_id: str) -> str:
+    if not mission_id:
+        return ""
+    try:
+        key = f"missions/{mission_id}/artifacts/ca_human_directive.md"
+        obj = s3.get_object(Bucket=BUCKET, Key=key)
+        return obj["Body"].read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
 def _extract_formation_from_text(text: str) -> Optional[str]:
     if not text:
         return None
@@ -361,7 +367,6 @@ def _extract_formation_from_text(text: str) -> Optional[str]:
         if m:
             return m.group(1)
     return None
-
 def _apply_formation_override(
     task_id: str,
     formation_name: str,
@@ -651,8 +656,10 @@ def advance_task(task_id: str, repo_url: Optional[str] = None) -> None:
         ca_patch_map = {}
         if current_stage == "CA":
             report_text = _read_ca_report(mission_id)
-            formation_name = _extract_formation_from_text(report_text) if report_text else None
-            directives = _parse_ca_directives(report_text)
+            human_text = _read_ca_human_directive(mission_id)
+            parse_text = "\n".join([t for t in [report_text, human_text] if t]).strip()
+            formation_name = _extract_formation_from_text(parse_text) if parse_text else None
+            directives = _parse_ca_directives(parse_text)
             ca_patch_map = directives.get("patch_map", {})
             if formation_name:
                 override = _apply_formation_override(task_id, formation_name, current_stage, stages_map)
@@ -711,7 +718,7 @@ def advance_task(task_id: str, repo_url: Optional[str] = None) -> None:
                         print(f"Advanced to extra stage {next_stage} (CA requested additional execution)")
                         return
 
-                extra_stages = _extract_extra_stages(report_text)
+                extra_stages = _extract_extra_stages(parse_text)
                 if extra_stages:
                     applied = _apply_extra_stages(task_id, current_stage, stage_list, stages_map, extra_stages)
                     if applied:
@@ -788,30 +795,41 @@ def advance_task(task_id: str, repo_url: Optional[str] = None) -> None:
 def check_ca_escalation(mission_id: str) -> bool:
     """Check if CA report indicates BB escalation is needed"""
     try:
-        # Read CA report from S3
-        key = f"missions/{mission_id}/artifacts/report.CA-01.md"
-        obj = s3.get_object(Bucket=BUCKET, Key=key)
-        report = obj["Body"].read().decode("utf-8")
-        
-        # Simple keyword detection (can be improved with AI)
-        escalation_keywords = ["BB", "battleship", "決戦", "Escalation", "decisive"]
-        completion_keywords = ["完了", "complete", "done", "no further", "不要"]
-        
-        # Check for completion signals first
+        report_text = _read_ca_report(mission_id)
+        if not report_text:
+            return False
+
+        report_lower = report_text.lower()
+
+        # Completion signals have priority over escalation signals.
+        completion_keywords = [
+            "complete",
+            "done",
+            "no further",
+            "no bb needed",
+            "bb not needed",
+            "bb不要",
+            "完了",
+        ]
         for keyword in completion_keywords:
-            if keyword.lower() in report.lower():
+            if keyword in report_lower:
                 return False
-        
-        # Check for escalation signals
+
+        escalation_keywords = [
+            "bb",
+            "battleship",
+            "escalation",
+            "decisive",
+            "戦艦",
+            "エスカレーション",
+        ]
         for keyword in escalation_keywords:
-            if keyword.lower() in report.lower():
+            if keyword in report_lower:
                 return True
-        
-        # Default: no escalation
+
         return False
     except Exception as e:
         print(f"Warning: Could not read CA report: {e}")
-        # Default: no escalation on error
         return False
 
 
@@ -917,3 +935,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
