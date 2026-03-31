@@ -1,0 +1,20 @@
+version: "3.9"
+services:
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    environment:
+      - DB=sqlite
+      - DB_FILENAME=/etc/temporal/temporal.db
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+
+  localstack:
+    image: localstack/localstack:3.0
+    environment:
+      - SERVICES=s3,sqs,dynamodb,sts
+      - DEBUG=0
+      - AWS_DEFAULT_REGION=ap-northeast-1
+    ports:
+      - "4566:4566"

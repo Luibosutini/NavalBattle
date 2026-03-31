@@ -88,6 +88,15 @@ def cmd_info(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    import sys as _sys
+    print(
+        "[DEPRECATED] navalctl.py は非推奨です。代わりに python -m naval ws を使ってください。\n"
+        "  python -m naval ws init\n"
+        "  python -m naval ws mkws --mission-id M-XXX --task-id T-XXX --ship-class CVL\n"
+        "  python -m naval ws search --query NEED_INPUT\n"
+        "  python -m naval ws tail\n",
+        file=_sys.stderr,
+    )
     parser = argparse.ArgumentParser(prog="navalctl", description="Local fleet helper CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

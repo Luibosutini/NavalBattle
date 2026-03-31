@@ -10,6 +10,7 @@ import time
 import uuid
 import re
 import boto3
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 try:
@@ -49,6 +50,199 @@ STAGE_STATUS_NEED_APPROVAL = "NEED_APPROVAL"
 
 def now() -> int:
     return int(time.time())
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_s3_uri(uri: str) -> tuple[Optional[str], Optional[str]]:
+    if not uri or not uri.startswith("s3://"):
+        return None, None
+    body = uri[5:]
+    bucket, sep, key = body.partition("/")
+    if not sep or not bucket or not key:
+        return None, None
+    return bucket, key
+
+
+def _read_s3_text(bucket: str, key: str) -> str:
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return obj["Body"].read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_brief(text: str, max_lines: int = 10, max_chars: int = 1400) -> str:
+    if not text:
+        return ""
+    picked: List[str] = []
+    for line in text.splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        picked.append(t)
+        if len(picked) >= max_lines:
+            break
+    if not picked:
+        return ""
+    brief = "\n".join(picked)
+    if len(brief) > max_chars:
+        brief = brief[: max_chars - 3] + "..."
+    return brief
+
+
+def _get_mission_state_item(mission_id: str) -> Dict[str, Any]:
+    if not mission_id:
+        return {}
+    try:
+        resp = dynamodb.get_item(
+            TableName=MISSION_STATE_TABLE,
+            Key={"mission_id": {"S": mission_id}},
+        )
+        return resp.get("Item", {}) or {}
+    except Exception:
+        return {}
+
+
+def _guess_report_text(mission_id: str, mission_state: Dict[str, Any]) -> str:
+    # 1) explicit result_s3
+    result_s3 = mission_state.get("result_s3", {}).get("S", "")
+    if result_s3:
+        b, k = _parse_s3_uri(result_s3)
+        if b and k:
+            txt = _read_s3_text(b, k)
+            if txt:
+                return txt
+
+    # 2) mission aar
+    if BUCKET:
+        txt = _read_s3_text(BUCKET, f"missions/{mission_id}/aar.md")
+        if txt:
+            return txt
+
+    # 3) fallback: first report.*.md under artifacts
+    if BUCKET:
+        prefix = f"missions/{mission_id}/artifacts/report."
+        try:
+            resp = s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix)
+            keys = sorted([o.get("Key", "") for o in resp.get("Contents", []) if o.get("Key", "").endswith(".md")])
+            for key in keys:
+                txt = _read_s3_text(BUCKET, key)
+                if txt:
+                    return txt
+        except Exception:
+            pass
+
+    return ""
+
+
+def _safe_ddb_str(item: Dict[str, Any], key: str, default: str = "") -> str:
+    node = item.get(key, {})
+    return node.get("S", default) if isinstance(node, dict) else default
+
+
+def _safe_ddb_num(item: Dict[str, Any], key: str) -> Optional[str]:
+    node = item.get(key, {})
+    if isinstance(node, dict) and "N" in node:
+        return node.get("N")
+    return None
+
+
+def generate_task_operation_report(task_id: str, final_status: str, reason: str = "") -> str:
+    task = get_task_state(task_id) or {}
+    stage_order_attr = task.get("stage_order", {}).get("L", [])
+    stage_order = [x.get("S") for x in stage_order_attr if isinstance(x, dict) and x.get("S")]
+    stages_map = task.get("stages", {}).get("M", {})
+    if not stage_order and isinstance(stages_map, dict):
+        stage_order = list(stages_map.keys())
+    formation = _safe_ddb_str(task, "formation", "-")
+    budget_month = _safe_ddb_str(task, "budget_month", "-")
+    ticket_s3 = _safe_ddb_str(task, "ticket_s3", "-")
+
+    lines: List[str] = []
+    lines.append(f"# Operation Report: {task_id}")
+    lines.append("")
+    lines.append(f"- generated_at: {_utc_now_iso()}")
+    lines.append(f"- final_status: {final_status}")
+    lines.append(f"- formation: {formation}")
+    lines.append(f"- budget_month: {budget_month}")
+    lines.append(f"- ticket_s3: {ticket_s3}")
+    if reason:
+        lines.append(f"- note: {reason}")
+    lines.append("")
+
+    for stage in stage_order:
+        stage_node = stages_map.get(stage, {}).get("M", {})
+        stage_status = _safe_ddb_str(stage_node, "status", "UNKNOWN")
+        mission_id = _safe_ddb_str(stage_node, "mission_id", "")
+        profile = _get_ship_profile(stage)
+        lines.append(f"## {stage} ({stage_status})")
+        if profile.get("role"):
+            lines.append(f"- role: {profile['role']}")
+        if profile.get("voice"):
+            lines.append(f"- voice: {profile['voice']}")
+        focus = profile.get("focus")
+        if isinstance(focus, list) and focus:
+            lines.append(f"- focus: {', '.join([str(x) for x in focus[:3]])}")
+
+        if not mission_id:
+            lines.append("- mission_id: (none)")
+            lines.append("")
+            continue
+
+        mission_state = _get_mission_state_item(mission_id)
+        mission_status = _safe_ddb_str(mission_state, "status", "-")
+        confidence = _safe_ddb_num(mission_state, "confidence_level")
+        fail_reason = _safe_ddb_str(mission_state, "fail_reason", "")
+        result_s3 = _safe_ddb_str(mission_state, "result_s3", "")
+
+        lines.append(f"- mission_id: {mission_id}")
+        lines.append(f"- mission_status: {mission_status}")
+        if confidence is not None:
+            lines.append(f"- confidence_level: {confidence}")
+        if result_s3:
+            lines.append(f"- result_s3: {result_s3}")
+        if fail_reason:
+            lines.append(f"- fail_reason: {fail_reason}")
+
+        brief = _extract_brief(_guess_report_text(mission_id, mission_state))
+        if brief:
+            lines.append("- report_excerpt:")
+            lines.append("```text")
+            lines.append(brief)
+            lines.append("```")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def save_task_operation_report(task_id: str, content: str) -> Optional[str]:
+    if not BUCKET:
+        return None
+    key = f"tasks/{task_id}/operation_report.md"
+    try:
+        s3.put_object(
+            Bucket=BUCKET,
+            Key=key,
+            Body=content.encode("utf-8"),
+            ContentType="text/markdown; charset=utf-8",
+        )
+        return f"s3://{BUCKET}/{key}"
+    except Exception as e:
+        print(f"Warning: failed to save operation report: {e}")
+        return None
+
+
+def emit_task_operation_report(task_id: str, final_status: str, reason: str = "") -> None:
+    content = generate_task_operation_report(task_id, final_status, reason)
+    print("\n" + "=" * 72)
+    print(content.rstrip())
+    uri = save_task_operation_report(task_id, content)
+    if uri:
+        print(f"\n[INFO] Operation report saved: {uri}")
+    print("=" * 72 + "\n")
 
 
 def _load_formations() -> Dict[str, Any]:
@@ -553,7 +747,7 @@ def enqueue_mission(
         MessageBody=json.dumps(payload, ensure_ascii=False)
     )
     
-    print(f"✓ Mission {mission_id} enqueued for stage {stage}")
+    print(f"[OK] Mission {mission_id} enqueued for stage {stage}")
     return mission_id
 
 
@@ -580,7 +774,7 @@ def start_task(task_id: str, repo_url: Optional[str] = None) -> None:
     update_task_status(task_id, TASK_STATUS_RUNNING)
     update_stage_status(task_id, current_stage, STAGE_STATUS_RUNNING, mission_id)
     
-    print(f"✓ Task {task_id} started with stage {current_stage}")
+    print(f"[OK] Task {task_id} started with stage {current_stage}")
 
 
 def check_mission_status(mission_id: str) -> Optional[str]:
@@ -627,17 +821,24 @@ def advance_task(task_id: str, repo_url: Optional[str] = None) -> None:
         if mission_status == "DONE" and stage_status != STAGE_STATUS_DONE:
             update_stage_status(task_id, current_stage, STAGE_STATUS_DONE)
             stage_status = STAGE_STATUS_DONE
-            print(f"✓ Stage {current_stage} completed")
+            print(f"[OK] Stage {current_stage} completed")
         elif mission_status == "FAILED":
             update_stage_status(task_id, current_stage, STAGE_STATUS_FAILED)
             update_task_status(task_id, TASK_STATUS_FAILED)
-            print(f"✗ Stage {current_stage} failed")
+            print(f"[ERR] Stage {current_stage} failed")
+            emit_task_operation_report(task_id, TASK_STATUS_FAILED, reason=f"{current_stage} mission failed")
+            return
+        elif mission_status == "BUDGET_DENIED":
+            update_stage_status(task_id, current_stage, STAGE_STATUS_FAILED)
+            update_task_status(task_id, TASK_STATUS_FAILED)
+            print(f"[ERR] Stage {current_stage} budget denied")
+            emit_task_operation_report(task_id, TASK_STATUS_FAILED, reason=f"{current_stage} mission budget denied")
             return
         elif mission_status in ["NEED_INPUT", "NEED_APPROVAL"]:
             stage_status_val = STAGE_STATUS_NEED_INPUT if mission_status == "NEED_INPUT" else STAGE_STATUS_NEED_APPROVAL
             update_stage_status(task_id, current_stage, stage_status_val)
             update_task_status(task_id, mission_status)
-            print(f"⚠ Stage {current_stage} needs human intervention: {mission_status}")
+            print(f"[WARN] Stage {current_stage} needs human intervention: {mission_status}")
             return
     
     # If current stage is done, decide next action
@@ -682,6 +883,7 @@ def advance_task(task_id: str, repo_url: Optional[str] = None) -> None:
                 if directives.get("done") is True:
                     update_task_status(task_id, TASK_STATUS_DONE)
                     print(f"Task {task_id} completed (CA done directive)")
+                    emit_task_operation_report(task_id, TASK_STATUS_DONE, reason="CA done directive")
                     return
 
                 if directives.get("execute"):
@@ -753,6 +955,7 @@ def advance_task(task_id: str, repo_url: Optional[str] = None) -> None:
                     # CA decided task is complete
                     update_task_status(task_id, TASK_STATUS_DONE)
                     print(f"Task {task_id} completed (CA decided no BB needed)")
+                    emit_task_operation_report(task_id, TASK_STATUS_DONE, reason="CA decided no BB needed")
                     return
             # If BB needed, continue to next stage
 
@@ -785,11 +988,12 @@ def advance_task(task_id: str, repo_url: Optional[str] = None) -> None:
             )
             update_stage_status(task_id, next_stage, STAGE_STATUS_RUNNING, mission_id)
             
-            print(f"✓ Advanced to stage {next_stage}")
+            print(f"[OK] Advanced to stage {next_stage}")
         else:
             # All stages complete
             update_task_status(task_id, TASK_STATUS_DONE)
-            print(f"✓ Task {task_id} completed")
+            print(f"[OK] Task {task_id} completed")
+            emit_task_operation_report(task_id, TASK_STATUS_DONE, reason="All configured stages completed")
 
 
 def check_ca_escalation(mission_id: str) -> bool:

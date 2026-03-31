@@ -1,0 +1,2 @@
+"""Naval unified CLI package."""
+

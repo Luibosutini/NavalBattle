@@ -7,8 +7,15 @@ import os
 import sys
 import time
 import json
+import subprocess
+from pathlib import Path
 import boto3
 from datetime import datetime
+
+if "--vnext" in sys.argv:
+    script = Path(__file__).resolve().parent / "tests" / "e2e" / "test_vnext_acceptance.py"
+    proc = subprocess.run([sys.executable, str(script)], cwd=str(Path(__file__).resolve().parent))
+    sys.exit(proc.returncode)
 
 # Set Bedrock model IDs before importing other modules
 os.environ["BEDROCK_SONNET_MODEL_ID"] = "arn:aws:bedrock:ap-northeast-1:249033470572:inference-profile/jp.anthropic.claude-sonnet-4-5-20250929-v1:0"
