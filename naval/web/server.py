@@ -426,10 +426,37 @@ def create_app(service_factory: Optional[Callable[[], FleetService]] = None) -> 
 app = create_app()
 
 
+def _pending_watcher(interval_sec: float = 30.0) -> None:
+    """承認・入力待ちを監視し、新規発生時に OS / Slack 通知を送る。"""
+    from naval.notify import notify
+
+    svc = FleetService(repo_root=REPO_ROOT)
+    known: set[str] = set()
+    first = True
+    while True:
+        try:
+            pending = svc.list_pending()
+            ids = {m.mission_id for m in pending}
+            fresh = ids - known
+            known = ids
+            if fresh and not first:
+                sample = sorted(fresh)[0]
+                extra = f" 他{len(fresh) - 1}件" if len(fresh) > 1 else ""
+                notify("Naval Battle", f"承認・入力待ち: {sample}{extra}")
+            first = False
+        except Exception:
+            pass
+        import time as _time
+
+        _time.sleep(interval_sec)
+
+
 def serve(host: str = "127.0.0.1", port: int = 8800, open_browser: bool = True) -> None:
     """`naval gui` コマンドのエントリポイント。"""
     import uvicorn
 
+    if os.getenv("NAVAL_GUI_NOTIFY", "1") != "0":
+        threading.Thread(target=_pending_watcher, daemon=True).start()
     if open_browser:
         import webbrowser
 
