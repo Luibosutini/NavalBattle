@@ -38,6 +38,8 @@ fleet_node.log
 fleet_work/
 *.md
 !README.md
+!CHANGE.md
+!docs/*.md
 
 # Temporary files
 *.tmp

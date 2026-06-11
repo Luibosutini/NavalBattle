@@ -55,6 +55,27 @@ python fleet_node.py
 .\scripts\start_fleet.ps1
 ```
 
+### 5. (Optional) Start the browser GUI
+
+No CLI knowledge required — submit, approve, and download results from the browser.
+
+```bash
+# Linux/macOS
+./scripts/start_gui.sh          # or: python -m naval gui
+
+# Windows (PowerShell)
+.\scripts\start_gui.ps1
+
+# Docker
+docker compose -f docker-compose.naval-local.yml up naval-gui
+```
+
+Opens `http://127.0.0.1:8800/` with: live mission dashboard, new-mission form,
+one-click approve/input, per-ship-class AI agent settings (model / max_tokens /
+temperature / persona), budget gauges, environment check, and a `.env` setup
+wizard. Pending approvals trigger browser / OS / Slack notifications
+(`NAVAL_SLACK_WEBHOOK_URL`).
+
 ---
 
 ## CLI Reference (`python -m naval`)
@@ -75,6 +96,7 @@ python -m naval [--runtime aws|temporal] <command> [options]
 | `input` | Send a text response to a NEED_INPUT mission |
 | `status` | Show mission status |
 | `watch` | Real-time dashboard (rich TUI) |
+| `gui` | **Browser GUI** — web dashboard for non-CLI users (`--host`, `--port`, `--no-browser`) |
 | `tail` | Show recent logs |
 | `pull` | Download mission artifacts from S3 |
 | `ca` | Send a CA directive to an in-progress task |

@@ -571,6 +571,25 @@ def retry(
     runtime_impl.retry(task_id=task_id, note=note)
 
 
+@app.command("gui")
+def gui(
+    host: str = typer.Option("127.0.0.1", "--host", help="バインドするホスト。LAN 共有時は 0.0.0.0。"),
+    port: int = typer.Option(8800, "--port", min=1, max=65535, help="ポート番号。"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="ブラウザを自動で開かない。"),
+) -> None:
+    """ブラウザ GUI サーバを起動する（CUI 不要の操作画面）。"""
+    try:
+        from naval.web.server import serve
+    except ModuleNotFoundError as exc:
+        typer.echo(
+            f"[ERROR] GUI の依存パッケージが不足しています ({exc.name})。"
+            " `pip install -r requirements.txt` を実行してください。",
+            err=True,
+        )
+        raise typer.Exit(1)
+    serve(host=host, port=port, open_browser=not no_browser)
+
+
 @app.command("pending")
 def pending(ctx: typer.Context) -> None:
     """NEED_INPUT / NEED_APPROVAL なミッションを一覧表示して対話応答する。"""

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
+import urllib.request
 
 
 def notify(title: str, message: str) -> None:
-    """Send a desktop notification. Falls back to terminal bell + print on failure."""
+    """Send a desktop notification. Falls back to terminal bell + print on failure.
+
+    NAVAL_SLACK_WEBHOOK_URL が設定されていれば Slack にも送る。
+    """
+    notify_slack(title, message)
     try:
         if sys.platform == "win32":
             _notify_windows(title, message)
@@ -17,6 +24,23 @@ def notify(title: str, message: str) -> None:
         sys.stdout.write("\a")
         sys.stdout.flush()
         print(f"[NOTIFY] {title}: {message}")
+
+
+def notify_slack(title: str, message: str) -> bool:
+    """Slack Incoming Webhook へ送信する。未設定・失敗時は False。"""
+    url = os.getenv("NAVAL_SLACK_WEBHOOK_URL", "")
+    if not url:
+        return False
+    try:
+        payload = json.dumps({"text": f"*{title}*\n{message}"}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+        return True
+    except Exception:
+        return False
 
 
 def _notify_windows(title: str, message: str) -> None:
