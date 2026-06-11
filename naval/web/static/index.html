@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Naval Battle 艦隊管制</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>⚓ Naval Battle 艦隊管制</h1>
+  <span id="conn-status" class="badge badge-dim">接続中…</span>
+  <button id="notify-btn" class="ghost" title="承認待ちが発生したらブラウザ通知を出します">🔔 通知を有効化</button>
+</header>
+
+<nav id="tabs">
+  <button data-tab="dashboard" class="active">ダッシュボード</button>
+  <button data-tab="new">新規ミッション</button>
+  <button data-tab="pending">承認・入力 <span id="pending-count" class="count" hidden></span></button>
+  <button data-tab="tasks">タスク</button>
+  <button data-tab="fleet">艦隊設定</button>
+  <button data-tab="budget">予算</button>
+  <button data-tab="doctor">環境チェック</button>
+</nav>
+
+<main>
+
+<!-- ダッシュボード -->
+<section id="tab-dashboard" class="tab active">
+  <div class="toolbar">
+    <input id="dash-filter" type="search" placeholder="ミッションID / 状態で絞り込み">
+    <button id="dash-refresh" class="ghost">↻ 更新</button>
+  </div>
+  <div id="dash-alert" class="alert" hidden></div>
+  <div id="mission-cards" class="cards"></div>
+</section>
+
+<!-- 新規ミッション -->
+<section id="tab-new" class="tab">
+  <form id="new-form" class="panel">
+    <h2>新規ミッションを投入</h2>
+    <label>やってほしいこと（チケット本文）<span class="req">必須</span>
+      <textarea name="objective" rows="6" required
+        placeholder="例: ログイン画面のバリデーションを追加してテストも書いてください"></textarea>
+    </label>
+    <label>Git リポジトリ URL
+      <input name="repo_url" type="url" placeholder="https://github.com/org/repo.git">
+    </label>
+    <div class="row">
+      <label>実行プラン（陣形）
+        <select name="doctrine" id="doctrine-select"></select>
+      </label>
+      <label>タスクID（空欄で自動採番）
+        <input name="task_id" placeholder="T-0001">
+      </label>
+    </div>
+    <p id="doctrine-desc" class="hint"></p>
+    <button type="submit" class="primary">🚀 投入する</button>
+    <p id="new-result" class="result"></p>
+  </form>
+</section>
+
+<!-- 承認・入力 -->
+<section id="tab-pending" class="tab">
+  <div id="pending-empty" class="panel ok" hidden>✅ 承認・入力待ちのミッションはありません</div>
+  <div id="pending-list"></div>
+</section>
+
+<!-- タスク -->
+<section id="tab-tasks" class="tab">
+  <div class="toolbar"><button id="tasks-refresh" class="ghost">↻ 更新</button></div>
+  <div id="task-list" class="cards"></div>
+  <div id="task-detail" class="panel" hidden></div>
+</section>
+
+<!-- 艦隊設定 -->
+<section id="tab-fleet" class="tab">
+  <p class="hint">艦種ごとの AI エージェント（モデル・パラメータ・行動指針）を設定します。
+  モデルやパラメータの変更は<strong>ワーカー再起動後</strong>に反映されます。</p>
+  <div id="fleet-cards" class="cards wide"></div>
+</section>
+
+<!-- 予算 -->
+<section id="tab-budget" class="tab">
+  <div class="toolbar">
+    <input id="budget-month" type="month">
+    <button id="budget-refresh" class="ghost">↻ 更新</button>
+  </div>
+  <div id="budget-body" class="panel"></div>
+</section>
+
+<!-- 環境チェック -->
+<section id="tab-doctor" class="tab">
+  <div class="toolbar"><button id="doctor-run" class="primary">環境チェックを実行</button></div>
+  <div id="doctor-body" class="panel" hidden></div>
+  <details class="panel">
+    <summary>⚙️ 初期設定（.env を生成）</summary>
+    <p class="hint">AWS のリソース名やモデル ID を入力して保存すると、リポジトリ直下の .env に書き込みます。</p>
+    <form id="setup-form"></form>
+  </details>
+</section>
+
+</main>
+
+<div id="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
