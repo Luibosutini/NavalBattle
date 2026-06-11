@@ -75,8 +75,13 @@ GUI から結果を受け取れない。まずここを直す。
 | GET | `/api/pending` | `pending` の一覧部分 |
 | GET | `/api/budget` | `status --month` |
 | GET | `/api/doctor` | `doctor` |
+| GET | `/api/fleet/ships` | `config.yaml` の `ships:` 一覧（艦種ごとのエージェント設定） |
+| PUT | `/api/fleet/ships/{ship_class}` | 艦種のエージェント設定を更新（`config.yaml` へ書き戻し） |
+| GET | `/api/fleet/models` | 割当可能なモデル一覧（Bedrock inference profile の列挙） |
 | WS/SSE | `/api/events` | `watch` のリアルタイム更新 |
 
+- [ ] 艦種設定の読み書きモジュールを追加: `config.yaml` の `ships:` を検証付きで
+      更新する（不正な YAML を書き込まない、未知のキーは保持、書き込み前にバックアップ）
 - [ ] `--runtime aws|temporal` 相当はサーバ起動時オプションで選択
 - [ ] リアルタイム更新は SSE（実装が単純）から始め、必要なら WebSocket 化
 - [ ] API の機能テストを `tests/functional/` に追加
@@ -97,6 +102,18 @@ GUI から結果を受け取れない。まずここを直す。
       成果物ダウンロードリンク（`pull` 相当）
 - [ ] **予算ゲージ**: Fuel / BB / CA / CVB の残量をプログレスバー表示
 - [ ] **環境チェック画面**: `doctor` の結果を ✅/⚠️/❌ で表示。初回起動時に自動実行
+- [ ] **艦隊設定画面（艦種ごとの AI エージェント設定）**: 艦種（CVL / DD / CL /
+      CVB / CA / BB と `DD_SONNET` 等の派生）ごとにカードを並べ、以下を編集可能にする
+  - **割当モデル**: 利用可能な Bedrock モデル（inference profile）からプルダウン選択。
+    現在の `model_env`（`BEDROCK_*_MODEL_ID`）→ 環境変数という間接参照を GUI が吸収し、
+    ユーザーには「この艦種はこのモデル」とだけ見せる
+  - **兵装パラメータ**: `max_tokens` / `temperature` をスライダー＋数値入力で編集
+  - **ペルソナ・行動指針**: `role`（役割）/ `voice`（口調）/ `objective`（目的）/
+    `thinking`（思考様式）/ `constraints` / `checklist` / `focus` をフォーム編集
+  - 保存先は既存の `config.yaml` `ships:` セクション（`fleet_local.py` の
+    `get_ship_profile()` がそのまま読む形式を維持し、CLI/ワーカーと設定を共有）
+  - 編集前に現在値のプレビュー（`ws mental` 相当のメンタルモデル表示）を表示し、
+    「保存」「既定値に戻す」を用意
 
 技術選定: ビルド工程を持たない軽量構成（素の HTML + htmx または Alpine.js +
 FastAPI の静的配信）を第一候補とする。フロントのビルドチェーンを持ち込まない
@@ -134,6 +151,8 @@ FastAPI の静的配信）を第一候補とする。フロントのビルドチ
 | フェーズ 0 のリファクタで既存 CLI を壊す | CLI 出力のスナップショットテストを先に追加してから着手 |
 | `watch` / `tail --follow` のポーリングが API 化で複雑になる | まず SSE + サーバ側ポーリングの単純な実装で割り切る |
 | 非エンジニアにとって AWS 認証情報の設定が依然難しい | フェーズ 3 の設定ウィザード＋`doctor` 画面でエラーを平易な日本語で説明 |
+| 艦種設定を GUI で変更しても反映されない（`fleet_local.py` がプロセス内キャッシュ `_CONFIG_CACHE` を持ち、ワーカーは環境変数を起動時に読む） | 設定保存 API でキャッシュを明示的に無効化。モデル割当の変更時は GUI に「ワーカー再起動が必要」と表示し、将来的にワーカー側のリロード機構を検討 |
+| GUI からの `config.yaml` 書き込みで手書き設定（コメント等）を壊す | 書き込み前バックアップ＋`ships:` セクション以外は変更しない方針。検証エラー時は保存を拒否 |
 
 ## 7. 推奨着手順
 
