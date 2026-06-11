@@ -38,6 +38,7 @@ fleet_node.log
 fleet_work/
 *.md
 !README.md
+!docs/GUI_IMPROVEMENT_PLAN.ja.md
 
 # Temporary files
 *.tmp
