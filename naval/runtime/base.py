@@ -101,6 +101,34 @@ class RuntimeBase(ABC):
     def pending(self) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def run(
+        self,
+        *,
+        objective: str,
+        ticket_file: str,
+        task_id: str,
+        repo_url: str,
+        doctrine: str,
+        budget: Optional[str],
+        interval: int,
+        auto_approve: bool,
+        auto_approve_threshold: int,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def abort(self, *, task_id: str, note: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def show(self, *, task_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def retry(self, *, task_id: str, note: str) -> None:
+        raise NotImplementedError
+
     # ------------------------------------------------------------------ #
     # ワークスペース管理（ランタイム非依存、navalctl.py に委譲）           #
     # ------------------------------------------------------------------ #

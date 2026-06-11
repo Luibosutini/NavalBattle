@@ -516,6 +516,717 @@ class AwsRuntime(RuntimeBase):
 
         return layout
 
+    # ------------------------------------------------------------------ #
+    # run() helpers                                                        #
+    # ------------------------------------------------------------------ #
+
+    def _put_ticket(
+        self,
+        task_id: str,
+        *,
+        objective: str,
+        ticket_file: str,
+        cfg: Dict[str, str],
+    ) -> str:
+        """Upload ticket to S3 and return the s3:// URI."""
+        bucket = cfg["bucket"]
+        region = cfg["region"]
+        if not bucket:
+            typer.echo("[ERROR] FLEET_S3_BUCKET is not set", err=True)
+            raise typer.Exit(2)
+
+        if ticket_file:
+            content = Path(ticket_file).expanduser().read_text(encoding="utf-8")
+        else:
+            content = f"# Mission Ticket\n\ntask_id: {task_id}\n\n{objective.strip()}\n"
+
+        key = f"tickets/{task_id}.md"
+        s3 = boto3.client("s3", region_name=region)
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=content.encode("utf-8"),
+            ContentType="text/markdown; charset=utf-8",
+        )
+        return f"s3://{bucket}/{key}"
+
+    def _get_task_status_ddb(
+        self, task_id: str, ddb: Any, cfg: Dict[str, str]
+    ) -> tuple[str, str]:
+        """Return (status, current_stage) from DynamoDB fleet-task-state."""
+        try:
+            resp = ddb.get_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            typer.echo(f"[ERROR] failed to get task status: {exc}", err=True)
+            raise typer.Exit(1)
+        item = resp.get("Item")
+        if not item:
+            return ("UNKNOWN", "")
+        status = item.get("status", {}).get("S", "UNKNOWN")
+        current_stage = item.get("current_stage", {}).get("S", "")
+        return status, current_stage
+
+    def _get_ca_confidence(self, task_id: str, ddb: Any, cfg: Dict[str, str]) -> int:
+        """Return CA mission confidence_level from DynamoDB, or 0 on failure."""
+        try:
+            resp = ddb.get_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+            )
+        except (ClientError, BotoCoreError):
+            return 0
+        item = resp.get("Item")
+        if not item:
+            return 0
+        mission_id = self._resolve_ca_mission_id(item)
+        if not mission_id:
+            return 0
+        try:
+            resp2 = ddb.get_item(
+                TableName=cfg["state_table"],
+                Key={"mission_id": {"S": mission_id}},
+            )
+        except (ClientError, BotoCoreError):
+            return 0
+        m_item = resp2.get("Item")
+        if not m_item:
+            return 0
+        cl = m_item.get("confidence_level", {})
+        raw = cl.get("N") or cl.get("S", "0")
+        try:
+            return int(float(raw))
+        except (ValueError, TypeError):
+            return 0
+
+    def _auto_approve_task_missions(
+        self,
+        task_id: str,
+        ddb: Any,
+        sqs_client: Any,
+        s3_client: Any,
+        cfg: Dict[str, str],
+        note: str,
+    ) -> int:
+        """Approve all NEED_APPROVAL missions in the task. Returns count approved."""
+        try:
+            resp = ddb.get_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            typer.echo(f"[ERROR] failed to get task item: {exc}", err=True)
+            return 0
+        item = resp.get("Item")
+        if not item:
+            return 0
+
+        stages = item.get("stages", {}).get("M", {})
+        approved = 0
+        for _stage_name, stage_val in stages.items():
+            stage_m = stage_val.get("M", {})
+            stage_status = stage_m.get("status", {}).get("S", "")
+            if stage_status != "NEED_APPROVAL":
+                continue
+            mission_id_val = stage_m.get("mission_id", {}).get("S", "")
+            if not mission_id_val:
+                continue
+            try:
+                self._resume_mission(
+                    ddb=ddb,
+                    sqs_client=sqs_client,
+                    s3=s3_client,
+                    mission_id=mission_id_val,
+                    expected_status="NEED_APPROVAL",
+                    new_status="RUNNING",
+                    response_text=note,
+                    state_table=cfg["state_table"],
+                    sqs_name=cfg["sqs_name"],
+                    bucket=cfg["bucket"],
+                )
+                approved += 1
+            except (typer.Exit, Exception):
+                pass
+        return approved
+
+    def _input_task_missions(
+        self,
+        task_id: str,
+        ddb: Any,
+        sqs_client: Any,
+        s3_client: Any,
+        cfg: Dict[str, str],
+        message: str,
+    ) -> int:
+        """Send input to all NEED_INPUT missions in the task. Returns count sent."""
+        try:
+            resp = ddb.get_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            typer.echo(f"[ERROR] failed to get task item: {exc}", err=True)
+            return 0
+        item = resp.get("Item")
+        if not item:
+            return 0
+
+        stages = item.get("stages", {}).get("M", {})
+        sent = 0
+        for _stage_name, stage_val in stages.items():
+            stage_m = stage_val.get("M", {})
+            stage_status = stage_m.get("status", {}).get("S", "")
+            if stage_status != "NEED_INPUT":
+                continue
+            mission_id_val = stage_m.get("mission_id", {}).get("S", "")
+            if not mission_id_val:
+                continue
+            try:
+                self._resume_mission(
+                    ddb=ddb,
+                    sqs_client=sqs_client,
+                    s3=s3_client,
+                    mission_id=mission_id_val,
+                    expected_status="NEED_INPUT",
+                    new_status="RUNNING",
+                    response_text=message,
+                    state_table=cfg["state_table"],
+                    sqs_name=cfg["sqs_name"],
+                    bucket=cfg["bucket"],
+                )
+                sent += 1
+            except (typer.Exit, Exception):
+                pass
+        return sent
+
+    @staticmethod
+    def _timed_input(prompt: str, timeout: int) -> Optional[str]:
+        """Show prompt and wait up to timeout seconds for input. Returns None on timeout."""
+        import threading
+
+        result: List[Optional[str]] = [None]
+        ready = threading.Event()
+
+        def _reader() -> None:
+            try:
+                result[0] = input(prompt)
+            except (EOFError, KeyboardInterrupt):
+                result[0] = None
+            finally:
+                ready.set()
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        ready.wait(timeout)
+        return result[0]
+
+    def run(
+        self,
+        *,
+        objective: str,
+        ticket_file: str,
+        task_id: str,
+        repo_url: str,
+        doctrine: str,
+        budget: Optional[str],
+        interval: int,
+        auto_approve: bool,
+        auto_approve_threshold: int,
+    ) -> None:
+        """1コマンドで投入からHITL対応まで完結するメインループ。"""
+        from naval.notify import notify
+        from rich.console import Console
+
+        console = Console()
+        cfg = self._resolve_aws_config()
+        region = cfg["region"]
+        budget_month = budget or self.ctx.now_month()
+
+        if not task_id:
+            task_id = f"T-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+
+        ddb = boto3.client("dynamodb", region_name=region)
+        sqs_client = boto3.client("sqs", region_name=region)
+        s3_client = boto3.client("s3", region_name=region) if cfg["bucket"] else None
+
+        # 1. チケットS3アップロード
+        ticket_s3 = self._put_ticket(
+            task_id,
+            objective=objective,
+            ticket_file=ticket_file,
+            cfg=cfg,
+        )
+
+        # 2. task_orchestrator init / start
+        self.run_script(
+            "task_orchestrator.py",
+            ["init", task_id, ticket_s3, budget_month, "--formation", doctrine],
+        )
+        start_args = ["start", task_id]
+        if repo_url:
+            start_args.append(repo_url)
+        self.run_script("task_orchestrator.py", start_args)
+
+        console.print(f"[bold green]Task started:[/bold green] {task_id}")
+        if auto_approve:
+            console.print(
+                f"[cyan]Auto-approve enabled (threshold={auto_approve_threshold})[/cyan]"
+            )
+        console.print(
+            "[dim]Ctrl+C to stop watching  |  RUNNING 中は Enter で CA 指令、q で終了[/dim]"
+        )
+
+        # 3. 監視ループ
+        terminal = {"DONE", "FAILED", "BUDGET_DENIED"}
+        last_state: tuple[Optional[str], Optional[str]] = (None, None)
+
+        try:
+            while True:
+                status, stage = self._get_task_status_ddb(task_id, ddb, cfg)
+                state = (status, stage)
+                if state != last_state:
+                    console.print(f"  status=[bold]{status}[/bold]  stage={stage}")
+                    last_state = state
+
+                if status in terminal:
+                    color = "green" if status == "DONE" else "red"
+                    console.print(f"[bold {color}]Finished: {status}[/bold {color}]")
+                    notify("Naval Battle", f"{task_id} {status}")
+                    break
+
+                advance_args = ["advance", task_id]
+                if repo_url:
+                    advance_args.append(repo_url)
+
+                if status == "NEED_APPROVAL":
+                    confidence = self._get_ca_confidence(task_id, ddb, cfg)
+                    if auto_approve and confidence >= auto_approve_threshold:
+                        n = self._auto_approve_task_missions(
+                            task_id,
+                            ddb,
+                            sqs_client,
+                            s3_client,
+                            cfg,
+                            f"Auto-approved (confidence={confidence})",
+                        )
+                        console.print(
+                            f"[green]Auto-approved {n} mission(s) (confidence={confidence})[/green]"
+                        )
+                        self.run_script("task_orchestrator.py", advance_args)
+                    else:
+                        notify(
+                            "Naval Battle",
+                            f"承認待ち: {task_id}  確信度={confidence}",
+                        )
+                        console.print(
+                            f"[bold yellow]Approval required[/bold yellow]"
+                            f"  confidence=[bold]{confidence}[/bold]/{auto_approve_threshold}"
+                        )
+                        ans = input("Approve? [y/N] (note after space, e.g. 'y looks good'): ").strip()
+                        if ans.lower().startswith("y"):
+                            note_text = ans[1:].strip() or f"Approved (confidence={confidence})"
+                            n = self._auto_approve_task_missions(
+                                task_id, ddb, sqs_client, s3_client, cfg, note_text
+                            )
+                            console.print(f"[green]Approved {n} mission(s).[/green]")
+                            self.run_script("task_orchestrator.py", advance_args)
+                        else:
+                            console.print("[dim]Skipped. Will poll again.[/dim]")
+                            time.sleep(interval)
+
+                elif status == "NEED_INPUT":
+                    notify("Naval Battle", f"入力待ち: {task_id}")
+                    console.print("[bold yellow]Input required[/bold yellow]")
+                    console.print("Enter response (Ctrl+D to finish, empty = skip):")
+                    lines_in: List[str] = []
+                    try:
+                        while True:
+                            lines_in.append(input())
+                    except EOFError:
+                        pass
+                    message = "\n".join(lines_in).strip()
+                    if message:
+                        n = self._input_task_missions(
+                            task_id, ddb, sqs_client, s3_client, cfg, message
+                        )
+                        console.print(f"[green]Input sent to {n} mission(s).[/green]")
+                        self.run_script("task_orchestrator.py", advance_args)
+                    else:
+                        console.print("[dim]No input. Will poll again.[/dim]")
+                        time.sleep(interval)
+
+                elif status in ("RUNNING", "ENQUEUED"):
+                    self.run_script("task_orchestrator.py", advance_args)
+                    # タイムアウト付き対話待機
+                    user_in = self._timed_input(
+                        f"  [{interval}s] CA指令を入力 (Enter=スキップ, q=終了): ",
+                        interval,
+                    )
+                    if user_in is None:
+                        pass  # timeout — continue
+                    elif user_in.strip().lower() == "q":
+                        console.print("[yellow]Watch stopped.[/yellow]")
+                        break
+                    elif user_in.strip():
+                        directive = user_in.strip()
+                        # S3 に CA 指令書を保存
+                        now_ts = int(time.time())
+                        now_iso = (
+                            datetime.fromtimestamp(now_ts, timezone.utc)
+                            .isoformat()
+                            .replace("+00:00", "Z")
+                        )
+                        content = (
+                            f"# Human CA Directive\n"
+                            f"task_id: {task_id}\n"
+                            f"updated_at: {now_iso}\n\n"
+                            f"{directive}\n"
+                        )
+                        try:
+                            resp = ddb.get_item(
+                                TableName=cfg["task_table"],
+                                Key={"task_id": {"S": task_id}},
+                            )
+                            mission_id = self._resolve_ca_mission_id(resp.get("Item", {}))
+                            if mission_id and s3_client and cfg["bucket"]:
+                                key = f"missions/{mission_id}/artifacts/ca_human_directive.md"
+                                s3_client.put_object(
+                                    Bucket=cfg["bucket"],
+                                    Key=key,
+                                    Body=content.encode("utf-8"),
+                                    ContentType="text/markdown; charset=utf-8",
+                                )
+                                console.print(
+                                    f"[green]CA directive saved → mission {mission_id}[/green]"
+                                )
+                                self.run_script("task_orchestrator.py", advance_args)
+                            else:
+                                console.print("[yellow]CA mission not found; directive not saved.[/yellow]")
+                        except Exception as exc:
+                            console.print(f"[red]Failed to save CA directive: {exc}[/red]")
+
+                else:
+                    console.print(f"[yellow]Unknown status: {status}[/yellow]")
+                    time.sleep(interval)
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Watch stopped (Ctrl+C).[/yellow]")
+
+    # ------------------------------------------------------------------ #
+    # abort / show / retry                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _cancel_mission_force(self, ddb: Any, mission_id: str, state_table: str) -> bool:
+        """ステータスを問わず CANCELLED に更新する。失敗時は False を返す。"""
+        now = int(time.time())
+        try:
+            ddb.update_item(
+                TableName=state_table,
+                Key={"mission_id": {"S": mission_id}},
+                UpdateExpression=(
+                    "SET #s=:cancelled, updated_at=:now"
+                    " REMOVE needs_input, needs_approval, owner, lock_until"
+                ),
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":cancelled": {"S": "CANCELLED"},
+                    ":now": {"N": str(now)},
+                },
+            )
+            return True
+        except (ClientError, BotoCoreError):
+            return False
+
+    def abort(self, *, task_id: str, note: str) -> None:
+        cfg = self._resolve_aws_config()
+        region = cfg["region"]
+        ddb = boto3.client("dynamodb", region_name=region)
+
+        try:
+            resp = ddb.get_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            typer.echo(f"[ERROR] failed to get task: {exc}", err=True)
+            raise typer.Exit(1)
+
+        item = resp.get("Item")
+        if not item:
+            typer.echo(f"[ERROR] task not found: {task_id}", err=True)
+            raise typer.Exit(1)
+
+        current_status = item.get("status", {}).get("S", "")
+        if current_status in ("DONE", "CANCELLED"):
+            typer.echo(f"[WARN] task is already {current_status}, nothing to abort.")
+            return
+
+        # アクティブなミッションを全て CANCELLED に
+        active = {"RUNNING", "ENQUEUED", "NEED_APPROVAL", "NEED_INPUT"}
+        stages = item.get("stages", {}).get("M", {})
+        cancelled_count = 0
+        for stage_val in stages.values():
+            stage_m = stage_val.get("M", {})
+            if stage_m.get("status", {}).get("S", "") not in active:
+                continue
+            mid = stage_m.get("mission_id", {}).get("S", "")
+            if mid and self._cancel_mission_force(ddb, mid, cfg["state_table"]):
+                cancelled_count += 1
+
+        # タスク自体を CANCELLED に
+        now = int(time.time())
+        abort_reason = note or "Aborted by user"
+        try:
+            ddb.update_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+                UpdateExpression=(
+                    "SET #s=:cancelled, updated_at=:now, abort_reason=:reason"
+                ),
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":cancelled": {"S": "CANCELLED"},
+                    ":now": {"N": str(now)},
+                    ":reason": {"S": abort_reason},
+                },
+            )
+        except (ClientError, BotoCoreError) as exc:
+            typer.echo(f"[ERROR] failed to cancel task: {exc}", err=True)
+            raise typer.Exit(1)
+
+        typer.echo(
+            f"aborted: task_id={task_id}"
+            f"  missions_cancelled={cancelled_count}"
+            f"  reason={abort_reason!r}"
+        )
+
+    def show(self, *, task_id: str) -> None:
+        try:
+            from rich.console import Console
+            from rich.panel import Panel
+            from rich.table import Table
+            from rich.text import Text
+        except ModuleNotFoundError:
+            typer.echo("[ERROR] Missing dependency: rich", err=True)
+            raise typer.Exit(1)
+
+        cfg = self._resolve_aws_config()
+        region = cfg["region"]
+        ddb = boto3.client("dynamodb", region_name=region)
+        console = Console()
+
+        try:
+            resp = ddb.get_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            typer.echo(f"[ERROR] failed to get task: {exc}", err=True)
+            raise typer.Exit(1)
+
+        item = resp.get("Item")
+        if not item:
+            typer.echo(f"[ERROR] task not found: {task_id}", err=True)
+            raise typer.Exit(1)
+
+        def _s(field: str) -> str:
+            v = item.get(field, {})
+            return v.get("S") or v.get("N") or ""
+
+        task_status = _s("status")
+        current_stage = _s("current_stage")
+        budget_month = _s("budget_month")
+
+        updated_raw = item.get("updated_at", {})
+        updated_n = updated_raw.get("N") or updated_raw.get("S", "0")
+        try:
+            updated_str = datetime.fromtimestamp(int(float(updated_n)), timezone.utc).strftime(
+                "%Y-%m-%d %H:%MZ"
+            )
+        except (ValueError, OSError):
+            updated_str = updated_n
+
+        status_color = {
+            "DONE": "green",
+            "FAILED": "red",
+            "CANCELLED": "yellow",
+            "RUNNING": "cyan",
+            "NEED_APPROVAL": "bold red",
+            "NEED_INPUT": "bold red",
+        }.get(task_status, "white")
+
+        console.print(
+            Panel(
+                f"task_id=[bold]{task_id}[/bold]  "
+                f"status=[{status_color}]{task_status}[/{status_color}]  "
+                f"stage={current_stage or '-'}  "
+                f"budget={budget_month or '-'}  "
+                f"updated={updated_str}",
+                title="Task",
+            )
+        )
+
+        stages = item.get("stages", {}).get("M", {})
+        if not stages:
+            console.print("[dim]No stage info.[/dim]")
+            return
+
+        # ミッションの詳細を一括取得
+        mission_items: Dict[str, Any] = {}
+        mid_list = [
+            v.get("M", {}).get("mission_id", {}).get("S", "")
+            for v in stages.values()
+            if v.get("M", {}).get("mission_id", {}).get("S", "")
+        ]
+        for mid in mid_list:
+            try:
+                r = ddb.get_item(
+                    TableName=cfg["state_table"],
+                    Key={"mission_id": {"S": mid}},
+                )
+                if "Item" in r:
+                    mission_items[mid] = r["Item"]
+            except (ClientError, BotoCoreError):
+                pass
+
+        tbl = Table(show_lines=True)
+        tbl.add_column("Stage", style="bold cyan", no_wrap=True)
+        tbl.add_column("Status", width=16)
+        tbl.add_column("Mission ID", overflow="fold")
+        tbl.add_column("Ship", width=5)
+        tbl.add_column("Conf", width=5, justify="right")
+        tbl.add_column("Updated", width=13)
+
+        stage_status_rank = {
+            "NEED_APPROVAL": 0, "NEED_INPUT": 1, "RUNNING": 2,
+            "ENQUEUED": 3, "FAILED": 4, "DONE": 5, "CANCELLED": 6,
+        }
+        sorted_stages = sorted(
+            stages.items(),
+            key=lambda kv: stage_status_rank.get(
+                kv[1].get("M", {}).get("status", {}).get("S", ""), 99
+            ),
+        )
+
+        for stage_name, stage_val in sorted_stages:
+            stage_m = stage_val.get("M", {})
+            st = stage_m.get("status", {}).get("S", "-")
+            mid = stage_m.get("mission_id", {}).get("S", "-")
+            ship = stage_m.get("ship_class", {}).get("S", "")
+
+            # ミッション詳細から補完
+            m_item = mission_items.get(mid, {})
+            if not ship:
+                ship = m_item.get("ship_class", {}).get("S", "")
+            conf_raw = m_item.get("confidence_level", {})
+            conf = conf_raw.get("N") or conf_raw.get("S", "")
+            m_updated = m_item.get("updated_at", {})
+            m_upd_n = m_updated.get("N") or m_updated.get("S", "0")
+            try:
+                m_upd_str = datetime.fromtimestamp(int(float(m_upd_n)), timezone.utc).strftime(
+                    "%m-%d %H:%MZ"
+                )
+            except (ValueError, OSError):
+                m_upd_str = ""
+
+            st_color = {
+                "DONE": "green", "FAILED": "red", "CANCELLED": "dim",
+                "RUNNING": "cyan", "NEED_APPROVAL": "bold red", "NEED_INPUT": "bold red",
+            }.get(st, "")
+            tbl.add_row(
+                stage_name,
+                Text(st, style=st_color),
+                mid if mid != "-" else "",
+                ship,
+                conf,
+                m_upd_str,
+            )
+
+        console.print(tbl)
+
+        abort_reason = item.get("abort_reason", {}).get("S", "")
+        if abort_reason:
+            console.print(f"[dim]abort_reason: {abort_reason}[/dim]")
+
+    def retry(self, *, task_id: str, note: str) -> None:
+        cfg = self._resolve_aws_config()
+        region = cfg["region"]
+        ddb = boto3.client("dynamodb", region_name=region)
+        sqs_client = boto3.client("sqs", region_name=region)
+        s3_client = boto3.client("s3", region_name=region) if cfg["bucket"] else None
+
+        try:
+            resp = ddb.get_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            typer.echo(f"[ERROR] failed to get task: {exc}", err=True)
+            raise typer.Exit(1)
+
+        item = resp.get("Item")
+        if not item:
+            typer.echo(f"[ERROR] task not found: {task_id}", err=True)
+            raise typer.Exit(1)
+
+        stages = item.get("stages", {}).get("M", {})
+        response_text = note or "Retried by user"
+        retried = 0
+        errors = 0
+
+        for stage_val in stages.values():
+            stage_m = stage_val.get("M", {})
+            if stage_m.get("status", {}).get("S", "") != "FAILED":
+                continue
+            mid = stage_m.get("mission_id", {}).get("S", "")
+            if not mid:
+                continue
+            try:
+                self._resume_mission(
+                    ddb=ddb,
+                    sqs_client=sqs_client,
+                    s3=s3_client,
+                    mission_id=mid,
+                    expected_status="FAILED",
+                    new_status="RUNNING",
+                    response_text=response_text,
+                    state_table=cfg["state_table"],
+                    sqs_name=cfg["sqs_name"],
+                    bucket=cfg["bucket"],
+                )
+                retried += 1
+            except (typer.Exit, Exception) as exc:
+                typer.echo(f"[WARN] could not retry mission {mid}: {exc}")
+                errors += 1
+
+        if retried == 0:
+            typer.echo(f"No FAILED missions found for task {task_id}.")
+            return
+
+        # タスクステータスを RUNNING に戻す
+        now = int(time.time())
+        try:
+            ddb.update_item(
+                TableName=cfg["task_table"],
+                Key={"task_id": {"S": task_id}},
+                UpdateExpression="SET #s=:running, updated_at=:now",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":running": {"S": "RUNNING"},
+                    ":now": {"N": str(now)},
+                },
+            )
+        except (ClientError, BotoCoreError) as exc:
+            typer.echo(f"[WARN] failed to reset task status: {exc}")
+
+        typer.echo(
+            f"retried: task_id={task_id}"
+            f"  missions_retried={retried}"
+            + (f"  errors={errors}" if errors else "")
+        )
+
     def pending(self) -> None:
         """NEED_INPUT / NEED_APPROVAL なミッションを一覧表示して対話応答する。"""
         try:

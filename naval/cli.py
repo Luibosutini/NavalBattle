@@ -501,6 +501,76 @@ def up(
     raise typer.Exit(2)
 
 
+@app.command("run")
+def run_cmd(
+    ctx: typer.Context,
+    objective: str = typer.Argument("", help="ミッション目的（自由記述）。"),
+    ticket: str = typer.Option("", "--ticket", help="チケット本文またはファイルパス。"),
+    task_id: str = typer.Option("", "--task-id", help="タスクID（省略時は自動生成）。"),
+    repo_url: str = typer.Option("", "--repo-url", help="GitリポジトリURL。"),
+    doctrine: str = typer.Option("standard_full", "--doctrine", help="陣形名。"),
+    budget: Optional[str] = typer.Option(None, "--budget", help="予算月 YYYY-MM。"),
+    interval: int = typer.Option(15, "--interval", min=5, help="ポーリング間隔（秒）。"),
+    auto_approve: bool = typer.Option(
+        False, "--auto-approve", help="確信度が閾値以上なら自動承認。"
+    ),
+    auto_approve_threshold: int = typer.Option(
+        75,
+        "--auto-approve-threshold",
+        min=0,
+        max=100,
+        help="自動承認の確信度閾値（0-100）。",
+    ),
+) -> None:
+    """1コマンドで投入からHITL対応まで完結。AIが自律実行し、必要な時だけ通知。"""
+    _, runtime_impl = _ctx_state(ctx)
+    if not objective and not ticket:
+        objective = typer.prompt("Mission objective")
+    runtime_impl.run(
+        objective=objective,
+        ticket_file=ticket,
+        task_id=task_id,
+        repo_url=repo_url,
+        doctrine=doctrine,
+        budget=budget,
+        interval=interval,
+        auto_approve=auto_approve,
+        auto_approve_threshold=auto_approve_threshold,
+    )
+
+
+@app.command("abort")
+def abort(
+    ctx: typer.Context,
+    task_id: str = typer.Argument(..., help="中断するタスク ID。"),
+    note: str = typer.Option("", "--note", help="中断理由（任意）。"),
+) -> None:
+    """実行中のタスクを強制中断し、全アクティブミッションを CANCELLED にする。"""
+    _, runtime_impl = _ctx_state(ctx)
+    runtime_impl.abort(task_id=task_id, note=note)
+
+
+@app.command("show")
+def show(
+    ctx: typer.Context,
+    task_id: str = typer.Argument(..., help="表示するタスク ID。"),
+) -> None:
+    """タスクの全ステージ・ミッション・確信度を詳細表示する。"""
+    _, runtime_impl = _ctx_state(ctx)
+    runtime_impl.show(task_id=task_id)
+
+
+@app.command("retry")
+def retry(
+    ctx: typer.Context,
+    task_id: str = typer.Argument(..., help="リトライするタスク ID。"),
+    note: str = typer.Option("", "--note", help="リトライ理由（任意）。"),
+) -> None:
+    """FAILED ミッションを再キューしてタスクを再開する。"""
+    _, runtime_impl = _ctx_state(ctx)
+    runtime_impl.retry(task_id=task_id, note=note)
+
+
 @app.command("pending")
 def pending(ctx: typer.Context) -> None:
     """NEED_INPUT / NEED_APPROVAL なミッションを一覧表示して対話応答する。"""

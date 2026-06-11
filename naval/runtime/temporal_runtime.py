@@ -582,6 +582,54 @@ class TemporalRuntime(RuntimeBase):
             "  naval input   --mission M-XXX \"...\"  で入力送信"
         )
 
+    def abort(self, *, task_id: str, note: str) -> None:
+        typer.echo(
+            "[INFO] abort は temporal runtime では未サポートです。"
+            " Temporal UI からワークフローをキャンセルしてください。"
+        )
+        raise typer.Exit(2)
+
+    def show(self, *, task_id: str) -> None:
+        typer.echo(
+            "[INFO] show は temporal runtime では未サポートです。"
+            " naval status --mission で代替できます。"
+        )
+        raise typer.Exit(2)
+
+    def retry(self, *, task_id: str, note: str) -> None:
+        typer.echo(
+            "[INFO] retry は temporal runtime では未サポートです。"
+            " Temporal UI からワークフローを再実行してください。"
+        )
+        raise typer.Exit(2)
+
+    def run(
+        self,
+        *,
+        objective: str,
+        ticket_file: str,
+        task_id: str,
+        repo_url: str,
+        doctrine: str,
+        budget: Optional[str],
+        interval: int,
+        auto_approve: bool,
+        auto_approve_threshold: int,
+    ) -> None:
+        if auto_approve:
+            typer.echo("[INFO] --auto-approve は temporal runtime では未サポートです。")
+        self.enqueue(
+            doctrine=doctrine,
+            ticket=ticket_file or objective,
+            budget=budget,
+            repo_url=repo_url,
+            task_id=task_id,
+            watch=True,
+            hitl_mode="",
+            hitl_timeout_hours=72,
+            hitl_timeout_action="failed",
+        )
+
     def ca(self, *, task_id: str, directive: str, repo_url: str, auto_advance: bool) -> None:
         typer.echo(
             "[INFO] ca command is not supported in temporal runtime. "
